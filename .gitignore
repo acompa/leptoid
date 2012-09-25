@@ -1,0 +1,26 @@
+# Vim
+.*.swp
+
+# Python
+leptoid/*.pyc
+
+# PNG files for dataviz
+*.png
+
+# R output
+.Rhistory
+*.Rout
+
+# Exploratory data files
+leptoid/pickled_data
+exploration/*
+
+# Log files
+*.log
+
+# Image files
+img/*
+
+# Random tars
+*.tar.gz
+

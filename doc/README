@@ -1,0 +1,102 @@
+== Introduction ==
+
+Leptoid is a Python library that automatically increases or decreases host capacity based on that host's forecasted load. Load forecasts are based on [https://en.wikipedia.org/wiki/Queuing_theory queuing theory], thus examining the rate at which Knewton services clear out requests from a figurative arrival queue.
+
+== Queuing Theory ==
+Leptoid uses queuing theory's definition of [https://en.wikipedia.org/wiki/Queuing_theory#Utilization utilization] to generate load forecasts. Instead of service rates, however, Leptoid uses service times (the amount of time taken to service a request). Service times are the inverse of service rates, so we can redefine utilization as the product of arrival rate and service time.
+
+== Usage ==
+
+As of August 17th, 2012, Leptoid's Gerrit branch lags behind current development. I've placed a tarball on cron-02.utility.knewton.net; users can start up Leptoid via
+
+    tar -zxvf leptoid-0.0.1-tar.gz
+    cd Leptoid
+    python bin/runit.py
+
+This should probably change in the future.
+
+== Design ==
+Leptoid main functions have been separated into three components:
+
+* communications with Graphite to retrieve arrival rate and service time data,
+* a time series forecasting module (currently written with a Python-to-R bridge) for analyzing utilization data, and
+* a deployment module responsible for scaling hosts in place (currently written using KBS and the deployment API)
+
+These components have been designed as facades, allowing them to be swapped out with no impact on the other components. For example, one can easily swap Leptoid's KBS-based deployment piece for a KCS-based deployment piece without impacting either forecast generation or Graphite communications.
+
+These components are wrapped into a single LeptoidScaler object responsible for retrieving data, forecasting utilization, and making deployment decisions based on user-defined utilization limits. Each of these components is described below.
+
+=== Data Extraction and Retrieval ===
+
+==== Extraction ====
+Our legacy readiness project uses Nginx proxies to route requests to various webservices and applications. We can thus analyze proxy logs to understand how frequently requests are routed to each service/app, as well as the time each service/app takes to satisfy these requests.
+
+We use [[Logster|Logster]] to parse our Nginx proxy logs. Knewton's version of Logster (checked into SVN) has a parser (parsers/NginxServiceTime.py) specifically written for this task. Thus, parsing proxy logs is as simple as:
+1. setting up Logster on the proxy
+2. making sure svn/utils/logster and svn/utils/cronjobs/bin both exist in ~isaac
+3. editing the root crontab so that svn/utils/cronjobs/bin/run_nginx_log_metrics_to_graphite.sh runs every minute
+
+The crontab command looks like this:
+    * * * * * /home/isaak/utils/cronjobs/bin/run_nginx_log_metrics_to_graphite.sh ${environment} >/tmp/logster_nginx.out 2>&1
+where $environment == {Production, Staging}.
+
+==== Retrieval ====
+
+Leptoid makes use of Graphite's /render API to retrieve the service time and arrival rate data produced by Logster. leptoid.graphite defines methods for building the render call, calling Graphite, and extracting a time series of data from the response.
+
+host_data is a nested dictionary with levels devoted to environment, service, and AWS instance id. Leptoid provides a convenient data structure (leptoid.ServiceQueue) that accepts the nested dictionary and generates objects with host information, as well as a method (leptoid.service_queue.generate_service_queues) to create a batch of these objects.
+
+In practice, you'll only need to call these methods:
+
+    raw_rates = graphite.call_graphite(arrival_rate_targets, api_parameters)
+    raw_times = graphite.call_graphite(service_time_targets, api_parameters)
+    arrival_rates = graphite.extract_time_series(raw_rates)
+    service_times = graphite.extract_time_series(raw_times)
+    service_queues = service_queue.generate_service_queues(arrival_rates, service_times)
+
+This could be further wrapped into fewer methods, but the above example provides some flexibility in how we model host load (we might want to move away from utilization some day).
+
+=== Forecasting ===
+
+After retrieving data from Graphite, Leptoid can forecast future utilization levels via the leptoid.forecasting module. Python's time-series forecasting options are lacking (read: none exist), so this module currently uses [http://robjhyndman.com/software/forecast/ R's 'forecast' package] via Python's [http://rpy.sourceforge.net/rpy2.html rpy2] library.
+
+The module is built to accept a leptoid.ServiceQueue and generate a forecast in one line:
+
+    in_sample_forecast, utilization_forecast = forecasting.forecast_util(queue)
+
+This method also plots the utilization forecast and stores the plots in a subdirectory; users can configure this via leptoid.forecasting.PLOT_DIRECTORY.
+
+    leptoid.forecasting.PLOT_DIRECTORY = 'img/'
+
+(which will probably change in the future).
+
+=== Deployment ===
+
+Leptoid will increase or decrease host capacity based on the utilization forecasts generated in leptoid.forecasting. Deployment actions are defined in leptoid.deploy, and they're as simple as
+
+    deploy.upscale(queue)
+
+for instances that need more capacity, and
+
+    deploy.downscale(queue)
+
+for instances that have too much capacity. Deployment is managed by [https://wiki.knewton.net/index.php/Tech/Projects/Knewton_Build_System Knewton Build System], so Leptoid also uses its rollback features to handle cases where downscaling actions result in unsustainable host utilization:
+
+    deploy.rollback(queue, rollback_build_id)
+
+=== The Scaler ===
+Note that, in some places, Leptoid's "facade" approach is porous. While the acts of scaling and querying Graphite are independent of the model used to forecast host load, configurations for scaling and querying Graphite both depend on the load model.
+
+As a solution, Leptoid introduces a middle piece to manage interactions. This piece -- defined in leptoid.scaler as...the LeptoidScaler -- is responsible for managing configurations for the retrieval, forecasting, and deployment pieces. On initialization it accepts a list of Graphite query targets and a YAML file with scaling and model configurations:
+
+    scaler = LeptoidScaler(NAMESPACES, scaling_config)
+
+Further, it wraps all of the above pieces relatively nicely:
+
+    service_queues = scaler.query_graphite_targets()
+    for queue in service_queues:
+        insample_forecast, util_estimate = forecasting.forecast_util(queue)
+        if util_estimate != None:
+            scaler.evaluate_instance(queue, util_estimate)
+       
+As can be seen above, it currently does not integrate the forecasting piece. That will change in a future commit.
