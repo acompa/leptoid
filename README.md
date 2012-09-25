@@ -101,7 +101,7 @@ Further, it wraps all of the above pieces relatively nicely:
 
 Here is a list of longer-term issues for the project:
 
-* We currently treat each service as its own queue, without accounting for its role in the larger Readiness system. [https://en.wikipedia.org/wiki/Jackson_network Jackson networks] address this issue and look like an interesting modeling option.
+* We currently treat each service as its own queue, without accounting for its role in the larger Readiness system. [Jackson networks](https://en.wikipedia.org/wiki/Jackson_network) address this issue and look like an interesting modeling option.
 * Configuration is not ideal. Some configs (leptoid.conf, targets.py) live in lib/python/leptoid, when they should live in e.g. /var/leptoid/conf. Others are hard-coded global variables in each module. These configs should either (a) pass in as command-line arguments to the run script, or (b) live in a conf directory.
 * Forecasting needs to be optimized. It isn't clear that we need to generate a new set of forecasting weights on every pass (i.e. calling R's forecast.forecast() in leptoid.forecasting), and maybe R's forecast.eps(), with occasional calls to forecast.forecast(), will suffice.
 * Related to the forecasting issue: forecasts for newly-deployed instances have accuracy issues, since they incorporate lots of NaN data. This missing data is cast to == 0 in leptoid.graphite (look for fillna(0)); a better approach would instead truncate all missing data at the start of a time series. I'm going to give this some thought this week.
